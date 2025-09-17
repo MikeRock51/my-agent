@@ -34,12 +34,11 @@ export const getFileChangesInDirectoryTool = tool({
 
 const generateCommitMessageSchema = z.object({
   rootDir: z.string().min(1).describe("The root directory to analyze for changes"),
-  style: z.enum(["conventional", "simple", "detailed"]).optional().describe("Commit message style - conventional (feat/fix/docs), simple, or detailed"),
 });
 
 type GenerateCommitMessageInput = z.infer<typeof generateCommitMessageSchema>;
 
-async function generateCommitMessage({ rootDir, style = "conventional" }: GenerateCommitMessageInput) {
+async function generateCommitMessage({ rootDir }: GenerateCommitMessageInput) {
   const git = simpleGit(rootDir);
 
   try {
@@ -48,10 +47,14 @@ async function generateCommitMessage({ rootDir, style = "conventional" }: Genera
     const diffSummary = await git.diffSummary();
 
     if (status.files.length === 0 && diffSummary.files.length === 0) {
-      return { message: null, error: "No changes detected to commit" };
+      return {
+        changes: null,
+        diffContent: null,
+        error: "No changes detected to commit"
+      };
     }
 
-    // Analyze the types of changes
+    // Collect file changes by type
     const changes = {
       added: [] as string[],
       modified: [] as string[],
@@ -79,7 +82,7 @@ async function generateCommitMessage({ rootDir, style = "conventional" }: Genera
       }
     }
 
-    // Get actual diff content for analysis
+    // Get actual diff content for LLM analysis
     const diffs: string[] = [];
     for (const file of diffSummary.files) {
       if (excludeFiles.includes(file.file)) continue;
@@ -87,155 +90,499 @@ async function generateCommitMessage({ rootDir, style = "conventional" }: Genera
       diffs.push(diff);
     }
 
-    // Analyze diff content to understand the nature of changes
-    const analysis = analyzeDiffContent(diffs.join('\n'));
+    const diffContent = diffs.join('\n\n');
 
-    // Generate commit message based on style
-    let message: string;
-
-    switch (style) {
-      case "conventional":
-        message = generateConventionalCommitMessage(changes, analysis);
-        break;
-      case "simple":
-        message = generateSimpleCommitMessage(changes, analysis);
-        break;
-      case "detailed":
-        message = generateDetailedCommitMessage(changes, analysis);
-        break;
-      default:
-        message = generateConventionalCommitMessage(changes, analysis);
-    }
-
-    return { message, changes, analysis };
+    return {
+      changes,
+      diffContent,
+      summary: {
+        totalFiles: status.files.length,
+        addedCount: changes.added.length,
+        modifiedCount: changes.modified.length,
+        deletedCount: changes.deleted.length,
+        renamedCount: changes.renamed.length
+      }
+    };
 
   } catch (error) {
-    return { message: null, error: `Failed to generate commit message: ${error}` };
+    return {
+      changes: null,
+      diffContent: null,
+      error: `Failed to analyze changes: ${error}`
+    };
   }
 }
 
-function analyzeDiffContent(diff: string): { type: string; scope?: string; description: string } {
-  // Simple analysis - could be enhanced with more sophisticated parsing
-  const lines = diff.split('\n');
-  let additions = 0;
-  let deletions = 0;
-  const keywords: { [key: string]: string } = {
-    'fix': 'fix',
-    'bug': 'fix',
-    'error': 'fix',
-    'test': 'test',
-    'spec': 'test',
-    'feature': 'feat',
-    'add': 'feat',
-    'new': 'feat',
-    'update': 'feat',
-    'refactor': 'refactor',
-    'improve': 'refactor',
-    'docs': 'docs',
-    'readme': 'docs',
-    'chore': 'chore',
-    'config': 'chore',
-    'build': 'build'
+
+export const generateCommitMessageTool = tool({
+    description: "Analyzes git changes and provides detailed context for generating appropriate commit messages",
+    inputSchema: generateCommitMessageSchema,
+    execute: generateCommitMessage,
+  });
+
+const generateMarkdownSchema = z.object({
+  type: z.enum(["readme", "api-docs", "changelog", "contributing", "architecture", "custom"]).describe("Type of markdown document to generate"),
+  title: z.string().min(1).describe("Title for the markdown document"),
+  content: z.string().optional().describe("Custom content or description for the document"),
+  sections: z.array(z.string()).optional().describe("Specific sections to include (for custom type)"),
+  projectInfo: z.object({
+    name: z.string().optional(),
+    description: z.string().optional(),
+    version: z.string().optional(),
+    author: z.string().optional(),
+    license: z.string().optional(),
+  }).optional().describe("Project information for documentation"),
+});
+
+type GenerateMarkdownInput = z.infer<typeof generateMarkdownSchema>;
+
+async function generateMarkdownFile({
+  type,
+  title,
+  content,
+  sections = [],
+  projectInfo
+}: GenerateMarkdownInput) {
+  try {
+    let markdown = '';
+
+    switch (type) {
+      case "readme":
+        markdown = generateReadmeMarkdown(title, content, projectInfo);
+        break;
+      case "api-docs":
+        markdown = generateApiDocsMarkdown(title, content);
+        break;
+      case "changelog":
+        markdown = generateChangelogMarkdown(title, content);
+        break;
+      case "contributing":
+        markdown = generateContributingMarkdown(title, content);
+        break;
+      case "architecture":
+        markdown = generateArchitectureMarkdown(title, content);
+        break;
+      case "custom":
+        markdown = generateCustomMarkdown(title, content, sections);
+        break;
+      default:
+        markdown = generateReadmeMarkdown(title, content, projectInfo);
+    }
+
+    return {
+      content: markdown,
+      type,
+      title,
+      sections: sections.length > 0 ? sections : getDefaultSections(type)
+    };
+
+  } catch (error) {
+    return {
+      content: null,
+      error: `Failed to generate markdown: ${error}`,
+      type,
+      title
+    };
+  }
+}
+
+function getDefaultSections(type: string): string[] {
+  const sectionMap: { [key: string]: string[] } = {
+    readme: ["Description", "Features", "Installation", "Usage", "Contributing", "License"],
+    "api-docs": ["Overview", "Endpoints", "Authentication", "Examples", "Error Handling"],
+    changelog: ["Unreleased", "Version History"],
+    contributing: ["Getting Started", "Development", "Testing", "Submitting Changes"],
+    architecture: ["Overview", "Components", "Data Flow", "Technology Stack", "Deployment"],
+    custom: ["Introduction", "Details", "Conclusion"]
   };
 
-  for (const line of lines) {
-    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
-    if (line.startsWith('-') && !line.startsWith('---')) deletions++;
-  }
-
-  // Look for keywords in diff content
-  const content = diff.toLowerCase();
-  let detectedType = 'feat'; // default
-
-  for (const [keyword, type] of Object.entries(keywords)) {
-    if (content.includes(keyword)) {
-      detectedType = type;
-      break;
-    }
-  }
-
-  // Determine scope based on file patterns
-  let scope: string | undefined;
-  if (content.includes('package.json') || content.includes('bun.lock')) {
-    scope = 'deps';
-  } else if (content.includes('.ts') || content.includes('.js')) {
-    scope = 'code';
-  } else if (content.includes('.md') || content.includes('readme')) {
-    scope = 'docs';
-  }
-
-  const isMostlyAdditions = additions > deletions * 2;
-  const isMostlyDeletions = deletions > additions * 2;
-  const hasTests = content.includes('test') || content.includes('spec');
-
-  let description = '';
-  if (isMostlyAdditions) {
-    description = hasTests ? 'add tests and features' : 'add new features';
-  } else if (isMostlyDeletions) {
-    description = 'remove unused code';
-  } else {
-    description = hasTests ? 'update tests and code' : 'update code';
-  }
-
-  return { type: detectedType, scope, description };
+  return sectionMap[type] || ["Introduction", "Content", "Conclusion"];
 }
 
-function generateConventionalCommitMessage(
-  changes: { added: string[]; modified: string[]; deleted: string[]; renamed: string[] },
-  analysis: { type: string; scope?: string; description: string }
-): string {
-  const { type, scope, description } = analysis;
-  const scopeStr = scope ? `(${scope})` : '';
-
-  const totalFiles = Object.values(changes).reduce((sum, files) => sum + files.length, 0);
-
-  if (totalFiles === 1) {
-    const file = [...changes.added, ...changes.modified, ...changes.deleted, ...changes.renamed][0];
-    return `${type}${scopeStr}: ${description} in ${file}`;
-  }
-
-  const parts = [];
-  if (changes.added.length > 0) parts.push(`${changes.added.length} file${changes.added.length > 1 ? 's' : ''} added`);
-  if (changes.modified.length > 0) parts.push(`${changes.modified.length} file${changes.modified.length > 1 ? 's' : ''} modified`);
-  if (changes.deleted.length > 0) parts.push(`${changes.deleted.length} file${changes.deleted.length > 1 ? 's' : ''} deleted`);
-
-  return `${type}${scopeStr}: ${description}${parts.length > 0 ? ` (${parts.join(', ')})` : ''}`;
-}
-
-function generateSimpleCommitMessage(
-  changes: { added: string[]; modified: string[]; deleted: string[]; renamed: string[] },
-  analysis: { type: string; scope?: string; description: string }
-): string {
-  return analysis.description.charAt(0).toUpperCase() + analysis.description.slice(1);
-}
-
-function generateDetailedCommitMessage(
-  changes: { added: string[]; modified: string[]; deleted: string[]; renamed: string[] },
-  analysis: { type: string; scope?: string; description: string }
-): string {
+function generateReadmeMarkdown(title: string, content?: string, projectInfo?: any): string {
   const lines = [];
 
-  // Main description
-  lines.push(analysis.description.charAt(0).toUpperCase() + analysis.description.slice(1));
+  // Header
+  lines.push(`# ${title}`);
+  lines.push('');
 
-  // File details
-  const fileDetails = [];
-  if (changes.added.length > 0) fileDetails.push(`Added: ${changes.added.join(', ')}`);
-  if (changes.modified.length > 0) fileDetails.push(`Modified: ${changes.modified.join(', ')}`);
-  if (changes.deleted.length > 0) fileDetails.push(`Deleted: ${changes.deleted.join(', ')}`);
-  if (changes.renamed.length > 0) fileDetails.push(`Renamed: ${changes.renamed.join(', ')}`);
+  // Badges (placeholder)
+  if (projectInfo?.version) {
+    lines.push(`[![Version](https://img.shields.io/badge/version-${projectInfo.version}-blue.svg)](https://github.com) `);
+  }
+  if (projectInfo?.license) {
+    lines.push(`[![License](https://img.shields.io/badge/license-${projectInfo.license}-green.svg)](LICENSE)`);
+  }
+  if (lines.length > 1) lines.push('');
 
-  if (fileDetails.length > 0) {
+  // Description
+  if (content || projectInfo?.description) {
+    lines.push(content || projectInfo.description);
     lines.push('');
-    lines.push('Files changed:');
-    fileDetails.forEach(detail => lines.push(`- ${detail}`));
+  }
+
+  // Table of Contents
+  lines.push('## Table of Contents');
+  lines.push('');
+  lines.push('- [Features](#features)');
+  lines.push('- [Installation](#installation)');
+  lines.push('- [Usage](#usage)');
+  lines.push('- [Contributing](#contributing)');
+  lines.push('- [License](#license)');
+  lines.push('');
+
+  // Features
+  lines.push('## Features');
+  lines.push('');
+  lines.push('- Feature 1');
+  lines.push('- Feature 2');
+  lines.push('- Feature 3');
+  lines.push('');
+
+  // Installation
+  lines.push('## Installation');
+  lines.push('');
+  lines.push('```bash');
+  lines.push('# Clone the repository');
+  lines.push('git clone <repository-url>');
+  lines.push('cd <project-directory>');
+  lines.push('');
+  lines.push('# Install dependencies');
+  lines.push('npm install');
+  lines.push('```');
+  lines.push('');
+
+  // Usage
+  lines.push('## Usage');
+  lines.push('');
+  lines.push('```javascript');
+  lines.push('// Example usage');
+  lines.push('const example = new Example();');
+  lines.push('example.doSomething();');
+  lines.push('```');
+  lines.push('');
+
+  // Contributing
+  lines.push('## Contributing');
+  lines.push('');
+  lines.push('Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.');
+  lines.push('');
+
+  // License
+  lines.push('## License');
+  lines.push('');
+  if (projectInfo?.license) {
+    lines.push(`This project is licensed under the ${projectInfo.license} License - see the [LICENSE](LICENSE) file for details.`);
+  } else {
+    lines.push('This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.');
+  }
+
+  if (projectInfo?.author) {
+    lines.push('');
+    lines.push(`## Author`);
+    lines.push('');
+    lines.push(projectInfo.author);
   }
 
   return lines.join('\n');
 }
 
-export const generateCommitMessageTool = tool({
-  description: "Generates an appropriate commit message based on the current git changes",
-  inputSchema: generateCommitMessageSchema,
-  execute: generateCommitMessage,
+function generateApiDocsMarkdown(title: string, content?: string): string {
+  const lines = [];
+
+  lines.push(`# ${title}`);
+  lines.push('');
+
+  if (content) {
+    lines.push(content);
+    lines.push('');
+  }
+
+  lines.push('## Overview');
+  lines.push('');
+  lines.push('API documentation for the project endpoints and functionality.');
+  lines.push('');
+
+  lines.push('## Base URL');
+  lines.push('');
+  lines.push('```');
+  lines.push('https://api.example.com/v1');
+  lines.push('```');
+  lines.push('');
+
+  lines.push('## Authentication');
+  lines.push('');
+  lines.push('Include the following header in your requests:');
+  lines.push('');
+  lines.push('```');
+  lines.push('Authorization: Bearer <your-api-key>');
+  lines.push('```');
+  lines.push('');
+
+  lines.push('## Endpoints');
+  lines.push('');
+
+  lines.push('### GET /api/resource');
+  lines.push('');
+  lines.push('Retrieve a list of resources.');
+  lines.push('');
+  lines.push('**Parameters:**');
+  lines.push('- `limit` (optional): Number of items to return');
+  lines.push('- `offset` (optional): Number of items to skip');
+  lines.push('');
+  lines.push('**Response:**');
+  lines.push('```json');
+  lines.push('{');
+  lines.push('  "data": [],');
+  lines.push('  "total": 0');
+  lines.push('}');
+  lines.push('```');
+  lines.push('');
+
+  lines.push('## Error Handling');
+  lines.push('');
+  lines.push('The API uses standard HTTP status codes and returns errors in the following format:');
+  lines.push('');
+  lines.push('```json');
+  lines.push('{');
+  lines.push('  "error": {');
+  lines.push('    "code": "ERROR_CODE",');
+  lines.push('    "message": "Error description"');
+  lines.push('  }');
+  lines.push('}');
+  lines.push('```');
+
+  return lines.join('\n');
+}
+
+function generateChangelogMarkdown(title: string, content?: string): string {
+  const lines = [];
+
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push('All notable changes to this project will be documented in this file.');
+  lines.push('');
+  lines.push('The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),');
+  lines.push('and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).');
+  lines.push('');
+
+  if (content) {
+    lines.push(content);
+    lines.push('');
+  }
+
+  lines.push('## [Unreleased]');
+  lines.push('');
+  lines.push('### Added');
+  lines.push('- New feature description');
+  lines.push('');
+  lines.push('### Changed');
+  lines.push('- Update description');
+  lines.push('');
+  lines.push('### Fixed');
+  lines.push('- Bug fix description');
+  lines.push('');
+
+  lines.push('## [1.0.0] - YYYY-MM-DD');
+  lines.push('');
+  lines.push('### Added');
+  lines.push('- Initial release');
+  lines.push('- Basic functionality');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function generateContributingMarkdown(title: string, content?: string): string {
+  const lines = [];
+
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push('We welcome contributions! Please follow these guidelines to help us maintain code quality and consistency.');
+  lines.push('');
+
+  if (content) {
+    lines.push(content);
+    lines.push('');
+  }
+
+  lines.push('## Getting Started');
+  lines.push('');
+  lines.push('1. Fork the repository');
+  lines.push('2. Clone your fork: `git clone https://github.com/your-username/repo-name.git`');
+  lines.push('3. Create a feature branch: `git checkout -b feature/your-feature-name`');
+  lines.push('4. Install dependencies: `npm install`');
+  lines.push('');
+
+  lines.push('## Development');
+  lines.push('');
+  lines.push('### Code Style');
+  lines.push('');
+  lines.push('- Follow the existing code style');
+  lines.push('- Use meaningful variable and function names');
+  lines.push('- Add comments for complex logic');
+  lines.push('- Keep functions small and focused');
+  lines.push('');
+
+  lines.push('### Testing');
+  lines.push('');
+  lines.push('- Write tests for new features');
+  lines.push('- Ensure all tests pass before submitting');
+  lines.push('- Run tests with: `npm test`');
+  lines.push('');
+
+  lines.push('## Submitting Changes');
+  lines.push('');
+  lines.push('1. Ensure your code follows the style guidelines');
+  lines.push('2. Write or update tests as needed');
+  lines.push('3. Update documentation if required');
+  lines.push('4. Commit your changes with a clear message');
+  lines.push('5. Push to your fork and create a Pull Request');
+  lines.push('');
+  lines.push('### Commit Message Format');
+  lines.push('');
+  lines.push('Use conventional commit format:');
+  lines.push('- `feat:` for new features');
+  lines.push('- `fix:` for bug fixes');
+  lines.push('- `docs:` for documentation');
+  lines.push('- `refactor:` for code restructuring');
+  lines.push('');
+
+  lines.push('## Code Review Process');
+  lines.push('');
+  lines.push('- All submissions require review');
+  lines.push('- Address review feedback promptly');
+  lines.push('- Once approved, your changes will be merged');
+  lines.push('');
+
+  lines.push('## Questions?');
+  lines.push('');
+  lines.push('Feel free to open an issue or discussion for questions about contributing.');
+
+  return lines.join('\n');
+}
+
+function generateArchitectureMarkdown(title: string, content?: string): string {
+  const lines = [];
+
+  lines.push(`# ${title}`);
+  lines.push('');
+  lines.push('This document describes the architecture and design decisions for the project.');
+  lines.push('');
+
+  if (content) {
+    lines.push(content);
+    lines.push('');
+  }
+
+  lines.push('## Overview');
+  lines.push('');
+  lines.push('High-level description of the system architecture.');
+  lines.push('');
+
+  lines.push('## Components');
+  lines.push('');
+  lines.push('### Component 1');
+  lines.push('- **Purpose:** Description of what this component does');
+  lines.push('- **Responsibilities:** List of key responsibilities');
+  lines.push('- **Dependencies:** What this component depends on');
+  lines.push('');
+
+  lines.push('### Component 2');
+  lines.push('- **Purpose:** Description of what this component does');
+  lines.push('- **Responsibilities:** List of key responsibilities');
+  lines.push('- **Dependencies:** What this component depends on');
+  lines.push('');
+
+  lines.push('## Data Flow');
+  lines.push('');
+  lines.push('```mermaid');
+  lines.push('graph TD');
+  lines.push('    A[Client] --> B[API Gateway]');
+  lines.push('    B --> C[Service 1]');
+  lines.push('    B --> D[Service 2]');
+  lines.push('    C --> E[Database]');
+  lines.push('    D --> E[Database]');
+  lines.push('```');
+  lines.push('');
+
+  lines.push('## Technology Stack');
+  lines.push('');
+  lines.push('### Frontend');
+  lines.push('- React');
+  lines.push('- TypeScript');
+  lines.push('- CSS Framework');
+  lines.push('');
+
+  lines.push('### Backend');
+  lines.push('- Node.js');
+  lines.push('- Express');
+  lines.push('- Database (PostgreSQL/MongoDB)');
+  lines.push('');
+
+  lines.push('### Infrastructure');
+  lines.push('- Docker');
+  lines.push('- Kubernetes');
+  lines.push('- CI/CD Pipeline');
+  lines.push('');
+
+  lines.push('## Deployment');
+  lines.push('');
+  lines.push('### Environment Setup');
+  lines.push('1. Prerequisites');
+  lines.push('2. Configuration');
+  lines.push('3. Build process');
+  lines.push('');
+
+  lines.push('### Deployment Steps');
+  lines.push('1. Build the application');
+  lines.push('2. Run tests');
+  lines.push('3. Deploy to staging');
+  lines.push('4. Deploy to production');
+  lines.push('');
+
+  lines.push('## Security Considerations');
+  lines.push('');
+  lines.push('- Authentication and authorization');
+  lines.push('- Data encryption');
+  lines.push('- Secure communication');
+  lines.push('- Input validation');
+  lines.push('');
+
+  return lines.join('\n');
+}
+
+function generateCustomMarkdown(title: string, content?: string, sections: string[] = []): string {
+  const lines = [];
+
+  lines.push(`# ${title}`);
+  lines.push('');
+
+  if (content) {
+    lines.push(content);
+    lines.push('');
+  }
+
+  // Generate sections
+  if (sections.length > 0) {
+    sections.forEach(section => {
+      lines.push(`## ${section}`);
+      lines.push('');
+      lines.push(`Content for ${section.toLowerCase()} section.`);
+      lines.push('');
+    });
+  } else {
+    lines.push('## Introduction');
+    lines.push('');
+    lines.push('Custom markdown document content.');
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+export const generateMarkdownTool = tool({
+  description: "Generates markdown files for documentation, READMEs, API docs, and more",
+  inputSchema: generateMarkdownSchema,
+  execute: generateMarkdownFile,
 });

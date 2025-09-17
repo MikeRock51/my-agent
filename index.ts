@@ -1,7 +1,7 @@
 import { stepCountIs, streamText } from "ai";
 import { google } from "@ai-sdk/google";
 import { SYSTEM_PROMPT } from "./prompts";
-import { getFileChangesInDirectoryTool, generateCommitMessageTool } from "./tools";
+import { getFileChangesInDirectoryTool, generateCommitMessageTool, generateMarkdownTool } from "./tools";
 
 const codeReviewAgent = async (prompt: string) => {
   const result = streamText({
@@ -11,6 +11,7 @@ const codeReviewAgent = async (prompt: string) => {
     tools: {
       getFileChangesInDirectoryTool: getFileChangesInDirectoryTool,
       generateCommitMessageTool: generateCommitMessageTool,
+      generateMarkdownTool: generateMarkdownTool,
     },
     stopWhen: stepCountIs(10),
   });
@@ -22,5 +23,5 @@ const codeReviewAgent = async (prompt: string) => {
 
 // Specify which directory the code review agent should review changes in your prompt
 await codeReviewAgent(
-  "Review the code changes in '../my-agent' directory, make your reviews and suggestions file by file and generate commit message",
+  "Review the code changes in '../my-agent' directory, make your reviews and suggestions file by file. Generate a Markdown file for the review and generate a good commit message for the changes.",
 );
